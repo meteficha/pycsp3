@@ -3,7 +3,7 @@
 </div>
 
 <br />
-<h2> PyCSP3 v2.6 <sub><sup>(March 1, 2026)</sup></sub> </h2> 
+<h2> PyCSP3 v2.6 <sub><sup>(March 1, 2026)</sup></sub> </h2>
 
 <!-- PyCSP3 is inspired from both [JvCSP3](https://github.com/xcsp3team/XCSP3-Java-Tools/blob/master/doc/JvCSP3v1-1.pdf) (a Java-based API) and [Numberjack](https://github.com/eomahony/Numberjack). -->
 
@@ -36,7 +36,7 @@ and  `pycsp3/solvers/choco`.
 For example, for running ACE on the XCSP3 instance 'zebra.xml', just execute:
 
 ```console
-java -jar ACE-YY-MM.jar zebra.xml 
+java -jar ACE-YY-MM.jar zebra.xml
 
 ```
 
@@ -57,13 +57,13 @@ What you have to do is:
 3. test a very basic model by inserting in a second code cell something like:
    ```
    from pycsp3 import *
-   
+
    x = VarArray(size=5, dom=range(5))
-   
+
    satisfy(
        AllDifferent(x)
-   )  
-   
+   )
+
    if solve() is SAT:
        print(values(x))
    ```
@@ -259,6 +259,18 @@ By default, a file containing the XCSP3 instance is generated, unless you use th
 
 * ```-display```: displays the XCSP3 instance in the system standard output, instead of generating an XCSP3 file
 
+# Running Tests
+
+PyCSP3 now includes an automated test suite under the top-level directory `tests/`.
+
+The current integration tests for solving callbacks use the embedded ACE solver only, so Java must be installed.
+
+From the repository root, run:
+
+```console
+python -m unittest discover -s tests -p "test_*.py" -v
+```
+
 ## Example 1: in console mode
 
 Our first example shows how you can build basic models in console mode.
@@ -276,7 +288,7 @@ Python 3.5.2
     )
 >>> compile()
 >>> if solve() is SAT:
-       print(value(x),value(y)) 
+       print(value(x),value(y))
 ```
 
 Note that to get an XCSP3 file, we call `compile()`.
@@ -726,7 +738,7 @@ Finally, `x[:, j]` denotes the jth column of `x`.
 ```python
 from pycsp3 import *
 
-rows, cols = data  # patterns for row and columns 
+rows, cols = data  # patterns for row and columns
 nRows, nCols = len(rows), len(cols)
 
 

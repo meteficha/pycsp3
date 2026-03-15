@@ -3,6 +3,7 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import uuid
 
 from lxml import etree
@@ -12,7 +13,7 @@ from pycsp3.classes.entities import VarEntities, EVar
 from pycsp3.classes.main.variables import Variable, VariableInteger
 from pycsp3.compiler import Compilation
 from pycsp3.dashboard import options
-from pycsp3.tools.utilities import Stopwatch, flatten, GREEN, WHITE, is_windows, ANY
+from pycsp3.tools.utilities import Stopwatch, flatten, GREEN, WHITE, is_windows, ANY, warning
 
 
 # from py4j.java_gateway import JavaGateway, Py4JNetworkError
@@ -133,11 +134,27 @@ class Logger:
 
 
 class Instantiation:
-    def __init__(self, root, variables, values, pretty_solution):
+    def __init__(self, root, variables, values, pretty_solution, bound=None):
         self.root = root
         self.variables = variables
         self.values = values
         self.pretty_solution = pretty_solution
+        self.bound = bound
+        self._value_of = None
+
+    def value(self, model_variables, *model_variables_complement):
+        from pycsp3.functions import _values_from
+
+        if self._value_of is None:
+            self._value_of = {var: self.values[i] for i, var in enumerate(self.variables) if var}
+
+        def _extractor(model_variable):
+            assert model_variable in self._value_of
+            return self._value_of[model_variable]
+
+        if isinstance(model_variables, Variable) and len(model_variables_complement) == 0:
+            return _extractor(model_variables)
+        return _values_from(model_variables, *model_variables_complement, extractor=_extractor)
 
     def __repr__(self):
         return self.variables, self.values
@@ -186,7 +203,7 @@ class SolverProcess:
         raise NotImplementedError("Must be overridden")
 
     def _solve(self, instance, string_options="", dict_options=None, dict_simplified_options=None, compiler=False, *, verbose=0, automatic=False,
-               extraction=False):
+               extraction=False, on_solution=None, should_stop=None):
         if dict_options is None:
             dict_options = dict()
         if dict_simplified_options is None:
@@ -202,9 +219,9 @@ class SolverProcess:
                 left -= 1
             return int(s[left + 1:right])
 
-        def _record_solution(roots, i):
+        def _variables_from_text(text):
             variables = []
-            for token in roots[i][0].text.split():
+            for token in text.split():
                 r = VarEntities.get_item_with_name(token)
                 if isinstance(r, EVar):
                     variables.append(r.variable)
@@ -213,12 +230,11 @@ class SolverProcess:
                 else:
                     for x in flatten(r.variables, keep_none=True):
                         variables.append(x)
-            if i == 0:  # reset the history in that case
-                for x in variables:
-                    if x:
-                        x.values = []
+            return variables
+
+        def _values_from_text(text):
             values = []
-            for tok in roots[i][1].text.split():
+            for tok in text.split():
                 if 'x' in tok:  # in order to handle compact forms in solutions
                     vk = tok.split('x')
                     assert len(vk) == 2
@@ -226,15 +242,53 @@ class SolverProcess:
                         values.append(vk[0])
                 else:
                     values.append(tok)
+            return values
+
+        def _typed_values(variables, values):
             # values is a list with all values given as strings (possibly '*')
             assert len(variables) == len(values)
+            typed_values = list(values)
+            for i, _ in enumerate(typed_values):
+                if variables[i] and isinstance(variables[i], VariableInteger):
+                    typed_values[i] = int(typed_values[i]) if typed_values[i] != "*" else ANY
+            return typed_values
+
+        def _solution_from_root(root):
+            variables = _variables_from_text(root[0].text)
+            values = _typed_values(variables, _values_from_text(root[1].text))
+            return variables, values
+
+        def _record_solution(roots, i):
+            variables, values = _solution_from_root(roots[i])
+            if i == 0:  # reset the history in that case
+                for x in variables:
+                    if x:
+                        x.values = []
             for i, _ in enumerate(values):
                 if variables[i]:
-                    if isinstance(variables[i], VariableInteger):
-                        values[i] = int(values[i]) if values[i] != "*" else ANY
                     variables[i].value = values[i]  # we record the last found solution value
                     variables[i].values.append(values[i])  # we record it in the history
             return variables, values
+
+        def _instantiation_from_root(root, variables, values, bound=None):
+            pretty_solution = etree.tostring(root, pretty_print=True, xml_declaration=False).decode("UTF-8").strip()
+            return Instantiation(root, variables, values, pretty_solution, bound)
+
+        def _xml_root(xml_text, *, warn_if_malformed=False):
+            try:
+                return etree.fromstring(xml_text.replace("\nv", ""), etree.XMLParser(remove_blank_text=True))
+            except etree.XMLSyntaxError as e:
+                if warn_if_malformed:
+                    warning("Malformed streamed instantiation ignored: " + str(e))
+                    return None
+                raise
+
+        def _roots_from_stdout(stdout):
+            if "limit=no" in string_options or ("limit_sols" in dict_simplified_options and int(dict_simplified_options["limit_sols"]) > 1):
+                # TODo findall does not seem to work with the output of Choco. why?
+                return [_xml_root("<instantiation" + tok + "</instantiation>") for tok in re.findall(r"<instantiation(.*?)</instantiation>", stdout)]
+            left, right = stdout.rfind("<instantiation"), stdout.rfind("</instantiation>")
+            return [_xml_root(stdout[left:right + len("</instantiation>")])]
 
         def extract_result_and_solution(stdout):
             if extraction:
@@ -251,13 +305,7 @@ class SolverProcess:
                 print("  Actually, the instance was not solved")
                 return TypeStatus.UNKNOWN
 
-            if "limit=no" in string_options or ("limit_sols" in dict_simplified_options and int(dict_simplified_options["limit_sols"]) > 1):
-                # TODo findall does not seem to work with the output of Choco. why?
-                roots = [etree.fromstring(("<instantiation" + tok + "</instantiation>").replace("\nv", ""), etree.XMLParser(remove_blank_text=True))
-                         for tok in re.findall(r"<instantiation(.*?)</instantiation>", stdout)]
-            else:
-                left, right = stdout.rfind("<instantiation"), stdout.rfind("</instantiation>")
-                roots = [etree.fromstring(stdout[left:right + len("</instantiation>")].replace("\nv", ""), etree.XMLParser(remove_blank_text=True))]
+            roots = _roots_from_stdout(stdout)
 
             for i in range(len(roots) - 1):  # all roots except the last one to record the history
                 _record_solution(roots, i)
@@ -285,8 +333,7 @@ class SolverProcess:
                 _array_values(array)  # we set the value of the field 'values'
                 # (currently, the recursive mode does not work; superficial copy when getting an item)
 
-            pretty_solution = etree.tostring(root, pretty_print=True, xml_declaration=False).decode("UTF-8").strip()
-            self.last_solution = Instantiation(root, variables, values, pretty_solution)
+            self.last_solution = _instantiation_from_root(root, variables, values, self.bound)
             j = stdout.find("d FOUND SOLUTIONS")
             if j != -1:
                 self.n_solutions = _int_from(stdout, j)
@@ -298,25 +345,69 @@ class SolverProcess:
             else:
                 p = subprocess.Popen(cmd.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
             stopped = False
+            stop = should_stop.is_set if isinstance(should_stop, threading.Event) else should_stop
             handler = signal.getsignal(signal.SIGINT)
+            interrupted = False
+
+            def interrupt_process():
+                nonlocal interrupted
+                if interrupted:
+                    return
+                interrupted = True
+                try:
+                    if not is_windows():
+                        os.killpg(os.getpgid(p.pid), signal.SIGINT)
+                    else:
+                        p.terminate()
+                except OSError:
+                    pass
+                finally:
+                    signal.signal(signal.SIGINT, handler)
 
             def new_handler(frame, signum):
                 global stopped
                 stopped = True
-                os.killpg(os.getpgid(p.pid), signal.SIGINT)
+                interrupt_process()
 
             signal.signal(signal.SIGINT, new_handler)
             end_prefix = self.log_filename_suffix if self.log_filename_suffix is not None else str(self.n_executions)
             log = Logger(end_prefix, verbose, Compilation.pathname)  # To record the output of the solver
             self.last_log = log.log_file
-            for line in p.stdout:
-                if verbose == 2:
-                    sys.stdout.write(line)
-                log.write(line)
-            p.wait()
-            p.terminate()
-            log.close()
-            signal.signal(signal.SIGINT, handler)  # Reset the right SIGINT
+            in_instantiation = False
+            instantiation_lines = []
+            try:
+                for line in p.stdout:
+                    if verbose == 2:
+                        sys.stdout.write(line)
+                    log.write(line)
+
+                    if on_solution is not None:
+                        if "<instantiation" in line and not in_instantiation:
+                            in_instantiation = True
+                            instantiation_lines = []
+                            line = line[line.find("<instantiation"):]
+                        if in_instantiation:
+                            if "</instantiation>" in line:
+                                line = line[:line.find("</instantiation>") + len("</instantiation>")]
+                            instantiation_lines.append(line)
+                            if "</instantiation>" in line:
+                                in_instantiation = False
+                                block = "".join(instantiation_lines).replace("\nv", "")
+                                instantiation_lines = []
+                                root = _xml_root(block, warn_if_malformed=True)
+                                if root is not None:
+                                    variables, values = _solution_from_root(root)
+                                    bound = int(root.attrib["cost"]) if "cost" in root.attrib else None
+                                    on_solution(_instantiation_from_root(root, variables, values, bound))
+
+                    if not stopped and stop is not None and stop():
+                        stopped = True
+                        interrupt_process()
+            finally:
+                p.wait()
+                p.terminate()
+                log.close()
+                signal.signal(signal.SIGINT, handler)  # Reset the right SIGINT
             return log.read(), stopped
 
         if model is not None and len(VarEntities.items) == 0:
@@ -366,9 +457,9 @@ class SolverProcess:
         return extract_result_and_solution(out_err) if out_err else TypeStatus.UNKNOWN
 
     def solve(self, instance, string_options="", dict_options=None, dict_simplified_options=None, compiler=False, *, verbose=0, automatic=False,
-              extraction=False):
+              extraction=False, on_solution=None, should_stop=None):
         self.status = self._solve(instance, string_options, dict_options, dict_simplified_options, compiler, verbose=verbose, automatic=automatic,
-                                  extraction=extraction)
+                                  extraction=extraction, on_solution=on_solution, should_stop=should_stop)
         return self.status
 
     def switch_to_extraction(self):

@@ -168,7 +168,8 @@ def _process_solving(solving):
     return t[0], args, args_recursive
 
 
-def solve(*, solver=ACE, options="", filename=None, verbose=-1, sols=None, extraction=False, directory=None, auto_delete=False):
+def solve(*, solver=ACE, options="", filename=None, verbose=-1, sols=None, extraction=False, directory=None, auto_delete=False,
+          on_solution=None, should_stop=None):
     """
     Solves the current model (after compiling it) and returns the status of this operation.
 
@@ -181,9 +182,18 @@ def solve(*, solver=ACE, options="", filename=None, verbose=-1, sols=None, extra
     :param extraction: True if an unsatisfiable core of constraints must be sought
     :param directory: directory where generated XML and log files must be written
     :param auto_delete: True if generated XML and log files must be removed after solving
+    :param on_solution: callback called on each intermediate solution produced by the solver
+    :param should_stop: callback or threading.Event used to stop the solver while it is running
     :return: the status of the solving operation
     """
     global _solver
+
+    def _append_solver_option(value, token):
+        value = (value or "").strip()
+        if token in value:
+            return value
+        return (value + " " + token).strip()
+
     compile_filename = filename
     if directory is not None:
         directory = os.fspath(directory)
@@ -216,10 +226,17 @@ def solve(*, solver=ACE, options="", filename=None, verbose=-1, sols=None, extra
             solver = ("[" if len(solver) > 0 and solver[0] != '[' else "") + solver + ("]" if len(solver) > 0 and solver[-1] != ']' else "")
 
         solver_name, args, args_recursive = _process_solving(solver)
+        if on_solution is not None:
+            if solver_name == ACE:
+                options = _append_solver_option(options, "-xe")
+                options = _append_solver_option(options, "-xc=false")
+            elif solver_name == CHOCO:
+                options = _append_solver_option(options, "-a")
         _solver = _set_solver(solver_name)
         _solver.setting(options)
         try:
-            return _solver.solve(instance, solver, args, args_recursive, verbose=verbose, extraction=extraction)
+            return _solver.solve(instance, solver, args, args_recursive, verbose=verbose, extraction=extraction,
+                                 on_solution=on_solution, should_stop=should_stop)
         finally:
             if auto_delete:
                 generated_xml = instance[0] if isinstance(instance, tuple) and len(instance) > 0 else None

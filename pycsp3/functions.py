@@ -2396,6 +2396,23 @@ def unpost(i=None, j=None):
         CtrEntities.items[i].delete(j)
 
 
+def _value_from(model_variable, *, sol=-1, extractor=None):
+    assert isinstance(model_variable, Variable)
+    if extractor is not None:
+        return extractor(model_variable)
+    assert len(model_variable.values) > 0
+    return model_variable.values[sol]
+
+
+def _values_from(model_variables, *model_variables_complement, sol=-1, extractor=None):
+    m = flatten(model_variables, model_variables_complement)
+    if isinstance(m, Variable):
+        return _value_from(m, sol=sol, extractor=extractor)
+    if isinstance(m, (list, tuple, set, frozenset, types.GeneratorType)):
+        g = [_value_from(v, sol=sol, extractor=extractor) for v in m]
+        return ListInt(g) if len(g) > 0 and (isinstance(g[0], (int, ListInt)) or g[0] == ANY) else g
+
+
 def value(model_variable, *, sol=-1):
     """
     Returns the value assigned to the specified variable when the solution at the specified index has been found
@@ -2403,8 +2420,7 @@ def value(model_variable, *, sol=-1):
     :param model_variable: a variable of the model
     :param sol: the index of a found solution
     """
-    assert isinstance(model_variable, Variable) and len(model_variable.values) > 0
-    return model_variable.values[sol]
+    return _value_from(model_variable, sol=sol)
 
 
 def values(model_variables, *model_variables_complement, sol=-1):
@@ -2416,9 +2432,4 @@ def values(model_variables, *model_variables_complement, sol=-1):
     :param model_variables_complement: the other terms (if any) on which the function applies
     :param sol: the order (index) of a found solution
     """
-    m = flatten(model_variables, model_variables_complement)
-    if isinstance(m, Variable):
-        return value(m, sol=sol)
-    if isinstance(m, (list, tuple, set, frozenset, types.GeneratorType)):
-        g = [value(v, sol=sol) for v in m]
-        return ListInt(g) if len(g) > 0 and (isinstance(g[0], (int, ListInt)) or g[0] == ANY) else g
+    return _values_from(model_variables, *model_variables_complement, sol=sol)
