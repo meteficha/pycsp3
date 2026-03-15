@@ -168,7 +168,7 @@ def _process_solving(solving):
     return t[0], args, args_recursive
 
 
-def solve(*, solver=ACE, options="", filename=None, verbose=-1, sols=None, extraction=False):
+def solve(*, solver=ACE, options="", filename=None, verbose=-1, sols=None, extraction=False, directory=None, auto_delete=False):
     """
     Solves the current model (after compiling it) and returns the status of this operation.
 
@@ -179,10 +179,21 @@ def solve(*, solver=ACE, options="", filename=None, verbose=-1, sols=None, extra
     :param verbose: verbosity level from -1 to 2
     :param sols: number of solutions to be found (ALL if no limit)
     :param extraction: True if an unsatisfiable core of constraints must be sought
+    :param directory: directory where generated XML and log files must be written
+    :param auto_delete: True if generated XML and log files must be removed after solving
     :return: the status of the solving operation
     """
     global _solver
-    instance = compile(filename, verbose=verbose)
+    compile_filename = filename
+    if directory is not None:
+        directory = os.fspath(directory)
+        os.makedirs(directory, exist_ok=True)
+        if compile_filename is None:
+            compile_filename = directory
+        else:
+            compile_filename = os.path.join(directory, os.path.basename(compile_filename))
+
+    instance = compile(compile_filename, verbose=verbose)
     if instance is None:
         print("Problem when compiling")
     else:
@@ -207,7 +218,18 @@ def solve(*, solver=ACE, options="", filename=None, verbose=-1, sols=None, extra
         solver_name, args, args_recursive = _process_solving(solver)
         _solver = _set_solver(solver_name)
         _solver.setting(options)
-        return _solver.solve(instance, solver, args, args_recursive, verbose=verbose, extraction=extraction)
+        try:
+            return _solver.solve(instance, solver, args, args_recursive, verbose=verbose, extraction=extraction)
+        finally:
+            if auto_delete:
+                generated_xml = instance[0] if isinstance(instance, tuple) and len(instance) > 0 else None
+                generated_log = None if _solver is None else _solver.last_log
+                for path in (generated_xml, generated_log):
+                    if path and os.path.exists(path):
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            warning("Unable to delete generated file: " + str(path))
 
         # _solver = _set_solver(solver)
         # if solver == ACE:
